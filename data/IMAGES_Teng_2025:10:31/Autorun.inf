@@ -1,0 +1,7 @@
+[AutoRun.Amd64]
+open=SDViewerLITE64.exe -a
+icon=SDViewerLITE64.exe, 0
+
+[autorun]
+open=SDViewerLITE64.exe -a
+icon=SDViewerLITE64.exe, 0
