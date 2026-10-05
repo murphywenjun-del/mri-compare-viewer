@@ -1,56 +1,168 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { ViewerPanel } from './components/ViewerPanel'
 import { Toolbar } from './components/Toolbar'
 import { parseDICOMSlice, groupSlicesIntoSeries } from './utils/dicom'
 import type { DICOMSeries, DICOMSlice } from './types'
 
-// Group series by year, then by series description so matching sequences align
-type YearGroup = { year: string; series: DICOMSeries[]; maxSlices: number }
+// ─── Types ───────────────────────────────────────────────────────────
+type YearGroup = { year: string; series: DICOMSeries[] }
 type SeriesByKey = Map<string, DICOMSeries>
 
-function buildYearGroups(seriesList: DICOMSeries[]): YearGroup[] {
-  const yearMap = new Map<string, SeriesByKey>()
+// ─── Series description normalization ────────────────────────────────
+// Normalizes series descriptions so "MRI MS BRAIN" and "MRI MS BRAIN CERVICAL SPINE 3D"
+// can be matched as related sequences for cross-year comparison.
+function normalizeSeriesDesc(desc: string): string {
+  return desc
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+}
 
+// Computes a similarity score between two normalized descriptions.
+// Returns 1.0 for exact match, 0.5 for substring, 0.0 for unrelated.
+function seriesSimilarity(a: string, b: string): number {
+  const na = normalizeSeriesDesc(a)
+  const nb = normalizeSeriesDesc(b)
+  if (na === nb) return 1.0
+  if (na.includes(nb) || nb.includes(na)) return 0.5
+  // Check if they share key words
+  const wordsA = na.split(' ')
+  const wordsB = nb.split(' ')
+  const common = wordsA.filter(w => wordsB.includes(w)).length
+  const total = new Set([...wordsA, ...wordsB]).size
+  if (total === 0) return 0
+  return common / total
+}
+
+// Finds the best matching series in `candidates` for a given description.
+function findBestMatch(seriesDesc: string, candidates: DICOMSeries[]): DICOMSeries | null {
+  let best: DICOMSeries | null = null
+  let bestScore = 0
+  for (const c of candidates) {
+    const score = seriesSimilarity(seriesDesc, c.seriesDesc ?? c.seriesNumber)
+    if (score > bestScore) { bestScore = score; best = c }
+  }
+  return bestScore >= 0.5 ? best : null
+}
+
+// ─── Grouping ────────────────────────────────────────────────────────
+function buildYearGroups(seriesList: DICOMSeries[]): YearGroup[] {
+  const yearMap = new Map<string, DICOMSeries[]>()
   for (const s of seriesList) {
-    if (!yearMap.has(s.year)) yearMap.set(s.year, new Map())
-    const keyMap = yearMap.get(s.year)!
-    const key = s.seriesDesc ?? s.seriesNumber
-    // Keep the first occurrence for each series description within a year
-    if (!keyMap.has(key)) keyMap.set(key, s)
+    if (!yearMap.has(s.year)) yearMap.set(s.year, [])
+    yearMap.get(s.year)!.push(s)
+  }
+  const years = [...yearMap.keys()].sort()
+  return years.map(year => ({ year, series: yearMap.get(year)! }))
+}
+
+// Builds aligned rows: each row = one logical sequence, columns = years.
+// Uses fuzzy matching so "BRAIN 3D" in 2026 matches "BRAIN CERVICAL SPINE 3D" in 2025.
+function buildAlignedRows(
+  yearGroups: YearGroup[],
+  seriesList: DICOMSeries[]
+): { rowKey: string; seriesDesc: string; entries: { year: string; series: DICOMSeries | null }[] }[] {
+  // Collect all unique series descriptions in order of appearance
+  const seen = new Set<string>()
+  const allDescriptions: string[] = []
+  for (const s of seriesList) {
+    const desc = s.seriesDesc ?? s.seriesNumber
+    if (!seen.has(desc)) { seen.add(desc); allDescriptions.push(desc) }
   }
 
-  const years = [...yearMap.keys()].sort()
-  return years.map(year => {
-    const keyMap = yearMap.get(year)!
-    const series = [...keyMap.values()]
-    const maxSlices = Math.max(...series.map(s => s.slices.length), 1)
-    return { year, series, maxSlices }
+  return allDescriptions.map(desc => {
+    const entries = yearGroups.map(yg => {
+      const match = findBestMatch(desc, yg.series)
+      return { year: yg.year, series: match }
+    })
+    return { rowKey: desc, seriesDesc: desc, entries }
   })
 }
 
+// ─── Known data folders ──────────────────────────────────────────────
+// Relative to public/data/ — auto-loaded on startup.
+const KNOWN_DATA_FOLDERS = [
+  'IMAGES_Teng_2025:10:31',
+  'IMAGES_Teng_2026:10:04',
+] as const
+
+// ─── Demo data loader ────────────────────────────────────────────────
+// Loads pre-stored DICOM data from public/data/ on app startup.
+// Uses HEAD requests to efficiently scan for existing files.
+async function loadDemoData(): Promise<DICOMSeries[]> {
+  const allSeries: DICOMSeries[] = []
+
+  for (const folder of KNOWN_DATA_FOLDERS) {
+    const dicomUrl = `/data/${folder}/IMAGES/DICOMS`
+    try {
+      // Check if folder exists
+      const sampleResp = await fetch(`${dicomUrl}/IM1`, { method: 'HEAD' })
+      if (!sampleResp.ok) continue
+
+      // Scan for files using HEAD requests, checking content-type to distinguish from SPA fallback
+      const files: string[] = []
+      for (let i = 1; i <= 3000; i++) {
+        const fname = `IM${i}`
+        try {
+          const resp = await fetch(`${dicomUrl}/${fname}`, { method: 'HEAD' })
+          // Vite SPA fallback returns 200 for missing files but with text/html content-type
+          const ct = resp.headers.get('content-type') || ''
+          if (resp.ok && !ct.includes('text/html')) files.push(fname)
+        } catch { break }
+      }
+
+      if (files.length === 0) continue
+
+      const slices: DICOMSlice[] = []
+      for (const fname of files) {
+        try {
+          const resp = await fetch(`${dicomUrl}/${fname}`)
+          if (!resp.ok) continue
+          const buffer = await resp.arrayBuffer()
+          const slice = parseDICOMSlice(buffer, fname)
+          if (slice) slices.push(slice)
+        } catch { /* skip */ }
+      }
+
+      if (slices.length > 0) {
+        const grouped = groupSlicesIntoSeries(slices)
+        for (const [, series] of grouped) {
+          allSeries.push(series)
+        }
+      }
+    } catch { /* skip folder */ }
+  }
+  return allSeries
+}
+
+// ─── Main App ────────────────────────────────────────────────────────
 export default function App() {
   const [seriesList, setSeriesList] = useState<DICOMSeries[]>([])
   const [activeTool, setActiveTool] = useState<'zoom' | 'pan' | 'wwwc' | 'length'>('wwwc')
   const [syncedSlice, setSyncedSlice] = useState<number>(0)
   const [loadingAll, setLoadingAll] = useState(false)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
-  // Synced WW/CC per series description key (shared across years)
   const [syncWW, setSyncWW] = useState<Map<string, number>>(new Map())
   const [syncWC, setSyncWC] = useState<Map<string, number>>(new Map())
+  const loadedRef = useRef(false)
 
   const yearGroups = useMemo(() => buildYearGroups(seriesList), [seriesList])
-  // Collect all unique series descriptions across all years, in order of first appearance
-  const allSeriesKeys = useMemo(() => {
-    const seen = new Set<string>()
-    const order: string[] = []
-    for (const yg of yearGroups) {
-      for (const s of yg.series) {
-        const key = s.seriesDesc ?? s.seriesNumber
-        if (!seen.has(key)) { seen.add(key); order.push(key) }
+  const alignedRows = useMemo(
+    () => buildAlignedRows(yearGroups, seriesList),
+    [yearGroups, seriesList]
+  )
+  const hasMultipleYears = yearGroups.length > 1
+
+  // Auto-load demo data on mount (one-shot via ref)
+  useEffect(() => {
+    if (loadedRef.current) return
+    loadedRef.current = true
+    loadDemoData().then(newSeries => {
+      if (newSeries.length > 0) {
+        setSeriesList(newSeries)
       }
-    }
-    return order
-  }, [yearGroups])
+    }).catch(() => {})
+  }, [])
 
   const processFiles = useCallback(async (files: File[]) => {
     if (files.length === 0) return
@@ -60,8 +172,13 @@ export default function App() {
 
     const slices: DICOMSlice[] = []
     let errors = 0
+    const seenNames = new Set<string>()
 
     for (const file of files) {
+      // Deduplicate by name to avoid re-processing
+      if (seenNames.has(file.name)) continue
+      seenNames.add(file.name)
+
       try {
         const buffer = await file.arrayBuffer()
         const view = new Uint8Array(buffer)
@@ -98,8 +215,8 @@ export default function App() {
     }
 
     setSeriesList(prev => {
-      const existingKeys = new Set(prev.map(s => s.id))
-      const toAdd = newSeries.filter(s => !existingKeys.has(s.id))
+      const existingIds = new Set(prev.map(s => s.id))
+      const toAdd = newSeries.filter(s => !existingIds.has(s.id))
       return [...prev, ...toAdd]
     })
 
@@ -110,6 +227,8 @@ export default function App() {
     setLoadingAll(false)
     if (errors > 0) {
       setErrorMsg(`完成，${errors} 个文件解析失败`)
+    } else {
+      setErrorMsg(null)
     }
   }, [])
 
@@ -133,7 +252,6 @@ export default function App() {
     setSyncedSlice(index)
   }, [])
 
-  // Sync WW/WC across all panels of the same series description
   const handleWWChange = useCallback((seriesDescKey: string, val: number) => {
     setSyncWW(prev => { const next = new Map(prev); next.set(seriesDescKey, val); return next })
   }, [])
@@ -146,8 +264,6 @@ export default function App() {
     setSyncWW(prev => { const next = new Map(prev); next.delete(seriesDescKey); return next })
     setSyncWC(prev => { const next = new Map(prev); next.delete(seriesDescKey); return next })
   }, [])
-
-  const hasMultipleYears = yearGroups.length > 1
 
   return (
     <div className="app">
@@ -186,11 +302,11 @@ export default function App() {
               </svg>
             </div>
             <h2>MRI 多年度对比查看器</h2>
-            <p>添加 DICOM 文件夹或文件，自动按年份和序列分组对比</p>
+            <p>自动加载本地数据，或拖入 DICOM 文件夹进行对比</p>
             <div className="empty-hints">
-              <span>支持整个 DICOM 文件夹</span>
+              <span>自动按年份分组</span>
               <span>·</span>
-              <span>自动按序列分组</span>
+              <span>智能序列匹配</span>
               <span>·</span>
               <span>多年度并排对比</span>
               <span>·</span>
@@ -199,42 +315,7 @@ export default function App() {
           </div>
         ) : hasMultipleYears ? (
           <div className="year-compare-view">
-            {allSeriesKeys.map((seriesKey, rowIdx) => (
-              <div key={seriesKey} className="series-row">
-                {/* Row label */}
-                <div className="series-label-cell">
-                  <span className="series-label-text">{seriesKey}</span>
-                </div>
-                {/* Year columns */}
-                {yearGroups.map(yg => {
-                  const series = yg.series.find(s => (s.seriesDesc ?? s.seriesNumber) === seriesKey)
-                  if (!series) {
-                    return <div key={yg.year} className="series-cell empty-cell" />
-                  }
-                  const effSlope = series.slices[0]?.slope ?? 1
-                  const effIntercept = series.slices[0]?.intercept ?? 0
-                  const effectiveSlope = (!effSlope || effSlope === 0 || Math.abs(effSlope) < 0.01 || !isFinite(effSlope)) ? 1 : effSlope
-                  const effectiveIntercept = (!effIntercept || Math.abs(effIntercept) < 1e-6 || !isFinite(effIntercept)) ? 0 : effIntercept
-                  return (
-                    <div key={yg.year} className="series-cell">
-                      <ViewerPanel
-                        series={series}
-                        tool={activeTool}
-                        onRemove={() => removeSeries(series.id)}
-                        syncedSlice={syncedSlice}
-                        onSliceChange={handleSliceChange}
-                        syncedWw={syncWW.get(seriesKey)}
-                        syncedWc={syncWC.get(seriesKey)}
-                        onWwChange={(v) => handleWWChange(seriesKey, v)}
-                        onWcChange={(v) => handleWCChange(seriesKey, v)}
-                        onReset={() => handleReset(seriesKey)}
-                      />
-                    </div>
-                  )
-                })}
-              </div>
-            ))}
-            {/* Year header row */}
+            {/* Column headers */}
             <div className="year-header-row">
               <div className="series-label-cell" />
               {yearGroups.map(yg => (
@@ -244,6 +325,36 @@ export default function App() {
                 </div>
               ))}
             </div>
+
+            {/* Data rows */}
+            {alignedRows.map(({ rowKey, seriesDesc, entries }) => (
+              <div key={rowKey} className="series-row">
+                <div className="series-label-cell">
+                  <span className="series-label-text" title={seriesDesc}>{seriesDesc}</span>
+                </div>
+                {entries.map(({ year, series }) => {
+                  if (!series) {
+                    return <div key={year} className="series-cell empty-cell" />
+                  }
+                  return (
+                    <div key={year} className="series-cell">
+                      <ViewerPanel
+                        series={series}
+                        tool={activeTool}
+                        onRemove={() => removeSeries(series.id)}
+                        syncedSlice={syncedSlice}
+                        onSliceChange={handleSliceChange}
+                        syncedWw={syncWW.get(rowKey)}
+                        syncedWc={syncWC.get(rowKey)}
+                        onWwChange={(v) => handleWWChange(rowKey, v)}
+                        onWcChange={(v) => handleWCChange(rowKey, v)}
+                        onReset={() => handleReset(rowKey)}
+                      />
+                    </div>
+                  )
+                })}
+              </div>
+            ))}
           </div>
         ) : (
           // Single year: flat grid layout
