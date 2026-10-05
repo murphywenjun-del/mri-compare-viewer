@@ -8,6 +8,11 @@ interface ViewerPanelProps {
   onRemove: () => void
   syncedSlice?: number
   onSliceChange?: (index: number) => void
+  syncedWw?: number
+  syncedWc?: number
+  onWwChange?: (val: number) => void
+  onWcChange?: (val: number) => void
+  onReset?: () => void
 }
 
 function getEffectiveSlope(slope: number | null | undefined): number {
@@ -24,12 +29,15 @@ function getEffectiveIntercept(intercept: number | null | undefined): number {
   return intercept
 }
 
-export function ViewerPanel({ series, tool, onRemove, syncedSlice, onSliceChange }: ViewerPanelProps) {
+export function ViewerPanel({ series, tool, onRemove, syncedSlice, onSliceChange, syncedWw, syncedWc, onWwChange, onWcChange, onReset }: ViewerPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [ww, setWw] = useState(400)
-  const [wc, setWc] = useState(0)
+  const [ww, setWw] = useState(syncedWw ?? 400)
+  const [wc, setWc] = useState(syncedWc ?? 0)
+  // Sync local state when parent provides synced values
+  useEffect(() => { if (syncedWw !== undefined) setWw(syncedWw) }, [syncedWw])
+  useEffect(() => { if (syncedWc !== undefined) setWc(syncedWc) }, [syncedWc])
   const [sliceIndex, setSliceIndex] = useState(0)
   const animFrameRef = useRef<number>(0)
   const activeSlice = syncedSlice !== undefined ? syncedSlice : sliceIndex
@@ -122,10 +130,10 @@ export function ViewerPanel({ series, tool, onRemove, syncedSlice, onSliceChange
   }, [renderImage])
 
   const handleSliceChange = useCallback((val: number) => { setSliceIndex(val); onSliceChange?.(val) }, [onSliceChange])
-  const handleWWChange = useCallback((val: number) => { setWw(val) }, [])
-  const handleWCChange = useCallback((val: number) => { setWc(val) }, [])
+  const handleWWChange = useCallback((val: number) => { setWw(val); onWwChange?.(val) }, [onWwChange])
+  const handleWCChange = useCallback((val: number) => { setWc(val); onWcChange?.(val) }, [onWcChange])
 
-  const handleReset = useCallback(() => {
+  const handleResetFn = useCallback(() => {
     const slice = series.slices[0]; if (!slice) return
     const ds = dicomParser.parseDicom(new Uint8Array(slice.buffer))
     const pe = ds.elements['x7fe00010']; if (!pe || !pe.dataOffset) return
@@ -224,14 +232,14 @@ export function ViewerPanel({ series, tool, onRemove, syncedSlice, onSliceChange
           <input type="range" min={-2000} max={2000} value={wc} onChange={e => handleWCChange(Number(e.target.value))} />
           <span className="control-value num">{wc}</span>
         </div>
-        <button className="btn-reset" onClick={handleReset} title="重置视图">
+        <button className="btn-reset" onClick={onReset ?? handleResetFn} title="重置窗宽窗位">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M1 4v6h6M23 20v-6h-6" strokeLinecap="round" strokeLinejoin="round"/>
             <path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
         </button>
       </div>
-      <div className="panel-tool-hint">{toolLabel} · {series.slices.length} 层 · 滚轮切换切片</div>
+      <div className="panel-tool-hint">{toolLabel} · {series.slices.length} 层 · 滚轮切换切片 · 窗宽窗位跨年度同步</div>
     </div>
   )
 }

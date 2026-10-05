@@ -8,6 +8,7 @@ interface ToolbarProps {
   activeTool: 'zoom' | 'pan' | 'wwwc' | 'length'
   onToolChange: (tool: 'zoom' | 'pan' | 'wwwc' | 'length') => void
   seriesCount: number
+  yearCount?: number
 }
 
 const TOOLS: { id: 'zoom' | 'pan' | 'wwwc' | 'length'; label: string; icon: React.ReactNode }[] = [
@@ -29,7 +30,7 @@ const TOOLS: { id: 'zoom' | 'pan' | 'wwwc' | 'length'; label: string; icon: Reac
   },
 ]
 
-export function Toolbar({ onAdd: _onAdd, onAddFolder, onClear, activeTool, onToolChange, seriesCount }: ToolbarProps) {
+export function Toolbar({ onAdd: _onAdd, onAddFolder, onClear, activeTool, onToolChange, seriesCount, yearCount }: ToolbarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
@@ -95,7 +96,7 @@ export function Toolbar({ onAdd: _onAdd, onAddFolder, onClear, activeTool, onToo
             <span>MRI Compare</span>
           </div>
           {seriesCount > 0 && (
-            <span className="series-count">{seriesCount} 个序列</span>
+            <span className="series-count">{seriesCount} 个序列{yearCount && yearCount > 1 ? ` · ${yearCount} 个年份` : ''}</span>
           )}
         </div>
 
