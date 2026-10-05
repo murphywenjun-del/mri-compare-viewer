@@ -156,6 +156,38 @@ export function ViewerPanel({ series, tool, onRemove, syncedSlice, onSliceChange
     setWw(w); setWc(c)
   }, [series])
 
+  // Wheel handler: only intercept when mouse is over the actual rendered image
+  // (not the padding/black-bar area around it caused by object-fit: contain)
+  const handleWheel = useCallback((e: WheelEvent) => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) return
+
+    // Ignore horizontal scrolls (trackball / magic scroll)
+    if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return
+    e.preventDefault()
+
+    const maxSlice = series.slices.length - 1
+    const step = e.shiftKey ? Math.max(1, Math.floor(maxSlice / 20)) : 1
+    const delta = e.deltaY > 0 ? step : -step
+
+    if (syncedSlice !== undefined) {
+      onSliceChange?.(Math.max(0, Math.min(maxSlice, syncedSlice + delta)))
+    } else {
+      setSliceIndex(prev => Math.max(0, Math.min(maxSlice, prev + delta)))
+    }
+  }, [series.slices.length, syncedSlice, onSliceChange])
+
+  const canvasContainerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const el = canvasContainerRef.current
+    if (!el) return
+    el.addEventListener('wheel', handleWheel, { passive: false })
+    return () => el.removeEventListener('wheel', handleWheel)
+  }, [handleWheel])
+
   const toolLabel = { zoom: '缩放', pan: '平移', wwwc: '窗宽窗位', length: '测距' }[tool]
 
   return (
@@ -171,7 +203,7 @@ export function ViewerPanel({ series, tool, onRemove, syncedSlice, onSliceChange
           </svg>
         </button>
       </div>
-      <div className="dicom-canvas">
+      <div className="dicom-canvas" ref={canvasContainerRef}>
         {loading && (<div className="loading-overlay"><div className="spinner" /><span>正在解析 DICOM...</span></div>)}
         {error && (<div className="error-overlay"><span>{error}</span></div>)}
         <canvas ref={canvasRef} className="dicom-render" />
@@ -199,7 +231,7 @@ export function ViewerPanel({ series, tool, onRemove, syncedSlice, onSliceChange
           </svg>
         </button>
       </div>
-      <div className="panel-tool-hint">{toolLabel} · {series.slices.length} 层</div>
+      <div className="panel-tool-hint">{toolLabel} · {series.slices.length} 层 · 滚轮切换切片</div>
     </div>
   )
 }

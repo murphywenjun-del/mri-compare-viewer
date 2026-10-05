@@ -261,6 +261,9 @@
 .panel-grid {
   display: grid;
   gap: 12px;
+}
+
+.panel-grid.grid-1 {
   height: 100%;
 }
 
